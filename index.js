@@ -70,7 +70,7 @@ app.post('/api/generate', async (req, res) => {
     if (emojis === 'no')  system += ' Do NOT use emojis.';
 
     const completion = await groq.chat.completions.create({
-      model: 'llama3-8b-8192',
+      model: 'llama-3.1-8b-instant',
       messages: [
         { role: 'system', content: system },
         { role: 'user',   content: prompt },

@@ -1,95 +1,137 @@
 const express = require('express');
-const cors    = require('cors');
+const cors = require('cors');
+const aiRouter = require('./services/aiRouter');
+const contentPack = require('./features/contentPack');
+const growthPlan = require('./features/growthPlan');
+const improve = require('./features/improve');
+const monetize = require('./features/monetize');
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
-
-// Groq client
-function getGroq() {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error('GROQ_API_KEY not set in environment variables');
-  const Groq = require('groq-sdk');
-  return new Groq({ apiKey: key });
-}
-
-// System prompts for all 17 tools
-const PROMPTS = {
-  caption:             'You are an expert social media caption writer. Create engaging, scroll-stopping captions. Use tone/length/emoji instructions if provided.',
-  hooks:               'You are a viral video hook expert. Write exactly 5 attention-grabbing opening lines numbered 1-5. Make each one punchy and curiosity-driven.',
-  hashtags:            'You are a hashtag strategy expert. Generate 30 relevant hashtags in ONE line, space-separated. Mix popular, medium, and niche tags. Start each with #.',
-  bio:                 'You are a social media bio expert. Write a compelling bio under 150 characters. Clear, engaging, personality-driven.',
-  'script-writer':     'You are a video script writer. Write a full script with HOOK, MAIN CONTENT, and CTA sections. Optimized for retention on short-form video.',
-  'idea-generator':    'You are a creative content strategist. Generate exactly 10 viral content ideas as a numbered list.',
-  'content-calendar':  'You are a content planning expert. Create a 7-day content calendar. Each day: Day number, post idea, post type (Reel/Story/Post), 3 key points.',
-  'cta-generator':     'You are a conversion copywriting expert. Write 5 compelling CTAs numbered 1-5. Each action-oriented and benefit-focused.',
-  'trend-analyzer':    'You are a trend analysis expert. Analyze this topic: 1) Trend status  2) Related trends  3) Content angles to capitalize.',
-  formatter:           'You are a text formatting expert for social media. Reformat the given text with line breaks and structure for max readability. Add emojis where natural.',
-  'rewrite-tool':      'You are an expert content editor. Rewrite the given content to be more engaging and compelling. Keep the original meaning.',
-  'engagement-boost':  'You are a social media engagement specialist. Rewrite this content to maximise engagement. Add questions, emotional triggers, and a strong CTA.',
-  'brand-voice-trainer':'You are a brand voice consultant. Write: 1) Tone guide  2) Key phrases  3) Do\'s & Don\'ts  4) Three example captions.',
-  'youtube-description':'You are a YouTube SEO expert. Write an SEO-optimized description with hook, overview, timestamps placeholder, CTAs, relevant keywords.',
-  'linkedin-post':     'You are a LinkedIn content expert. Write a professional yet engaging post with hook, value content, and CTA.',
-  'thread-generator':  'You are a Twitter/X thread expert. Write an 8-10 tweet thread. Format: "1/" "2/" etc. Start with a hook, end with a CTA.',
-  'seo-reel-optimizer':'You are an SEO expert for short-form video. Provide: 1) SEO caption  2) 20 hashtags  3) Best posting time  4) Trending audio tip.',
-};
+app.use(express.json());
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Bipoos API is running 🚀',
-    tools: Object.keys(PROMPTS).length,
-    timestamp: new Date().toISOString(),
+  res.json({ 
+    status: 'ok', 
+    message: 'Bipoos Growth System API',
+    version: '2.0.0',
+    features: ['content_pack', 'growth_plan', 'improve', 'monetize']
   });
 });
 
-// Generate content
+// Model availability check
+app.get('/api/models', (req, res) => {
+  const { userPlan } = req.query;
+  const models = aiRouter.getAvailableModels(userPlan || 'free');
+  res.json({
+    success: true,
+    userPlan: userPlan || 'free',
+    models
+  });
+});
+
+// Unified generation endpoint
 app.post('/api/generate', async (req, res) => {
-  const { toolType, prompt, tone, length, emojis } = req.body || {};
-
-  if (!toolType || !prompt) {
-    return res.status(400).json({ error: 'toolType and prompt are required' });
-  }
-  if (!PROMPTS[toolType]) {
-    return res.status(400).json({
-      error: `Unknown tool: ${toolType}`,
-      validTools: Object.keys(PROMPTS),
-    });
-  }
-
   try {
-    const groq = getGroq();
+    const { feature, userPlan, model, inputData } = req.body;
 
-    let system = PROMPTS[toolType];
-    if (tone)            system += ` Tone: ${tone}.`;
-    if (length)          system += ` Length: ${length}.`;
-    if (emojis === 'yes') system += ' Use relevant emojis.';
-    if (emojis === 'no')  system += ' Do NOT use emojis.';
+    // Validation
+    if (!feature) {
+      return res.status(400).json({ 
+        error: 'Missing required field: feature',
+        validFeatures: ['content_pack', 'growth_plan', 'improve', 'monetize']
+      });
+    }
 
-    const completion = await groq.chat.completions.create({
-      model: 'llama3-8b-8192',
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user',   content: prompt },
-      ],
-      temperature: 0.75,
-      max_tokens: 1024,
+    if (!inputData || typeof inputData !== 'object') {
+      return res.status(400).json({ 
+        error: 'Missing or invalid inputData object'
+      });
+    }
+
+    // Default values
+    const plan = userPlan || 'free';
+    const selectedModel = model || 'groq';
+
+    // Route to correct feature generator
+    let result;
+    switch (feature) {
+      case 'content_pack':
+        result = await contentPack.generate(plan, selectedModel, inputData);
+        break;
+      
+      case 'growth_plan':
+        result = await growthPlan.generate(plan, selectedModel, inputData);
+        break;
+      
+      case 'improve':
+        result = await improve.generate(plan, selectedModel, inputData);
+        break;
+      
+      case 'monetize':
+        result = await monetize.generate(plan, selectedModel, inputData);
+        break;
+      
+      default:
+        return res.status(400).json({ 
+          error: `Invalid feature: ${feature}`,
+          validFeatures: ['content_pack', 'growth_plan', 'improve', 'monetize']
+        });
+    }
+
+    res.json({
+      ...result,
+      userPlan: plan,
+      model: selectedModel,
+      timestamp: new Date().toISOString()
     });
 
-    const content = completion.choices[0]?.message?.content?.trim() || '';
-
-    return res.json({ success: true, content, tool: toolType });
-
-  } catch (err) {
-    console.error('[generate error]', err.message);
-    if (err.message.includes('GROQ_API_KEY')) {
-      return res.status(500).json({ error: 'GROQ_API_KEY not set on server.' });
-    }
-    return res.status(500).json({ error: 'Generation failed', detail: err.message });
+  } catch (error) {
+    console.error('[API Error]', error.message);
+    res.status(500).json({
+      error: 'Generation failed',
+      message: error.message
+    });
   }
 });
 
-app.listen(PORT, () => console.log(`Bipoos API running on port ${PORT}`));
+// Backward compatibility - old tool endpoint (deprecated)
+app.post('/api/generate-legacy', async (req, res) => {
+  try {
+    const { toolType, prompt } = req.body;
+    
+    // Map old tools to new features
+    const feature = 'improve';
+    const inputData = {
+      content: prompt,
+      action: 'rewrite'
+    };
+
+    const result = await improve.generate('free', 'groq', inputData);
+    
+    res.json({
+      success: true,
+      content: result.improved,
+      toolType,
+      notice: 'This endpoint is deprecated. Please use /api/generate with new feature system.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('[Server Error]', err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Bipoos Growth System API running on port ${PORT}`);
+  console.log(`✅ Available features: content_pack, growth_plan, improve, monetize`);
+  console.log(`🤖 AI Providers: Groq ${aiRouter.isModelAvailable('groq') ? '✓' : '✗'}, GPT ${aiRouter.isModelAvailable('gpt') ? '✓' : '✗'}, Gemini ${aiRouter.isModelAvailable('gemini') ? '✓' : '✗'}`);
+});

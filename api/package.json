@@ -1,0 +1,23 @@
+{
+  "name": "bipoos-local-business-backend",
+  "version": "3.0.0",
+  "description": "AI-powered marketing automation for local businesses",
+  "main": "index.js",
+  "engines": {
+    "node": "18.x"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": ["ai", "local-business", "marketing", "automation"],
+  "author": "Bipoos",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

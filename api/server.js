@@ -3,34 +3,41 @@ const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
-// Health check — shows key status
+// Health check
 app.get('/', (req, res) => {
   res.json({
     status: 'Zeno AI backend running',
-    version: '1.0',
-    key_set: !!GEMINI_API_KEY,
-    key_preview: GEMINI_API_KEY ? GEMINI_API_KEY.substring(0, 8) + '...' : 'NOT SET'
+    version: '2.0',
+    provider: 'Groq',
+    key_set: !!GROQ_API_KEY,
+    key_preview: GROQ_API_KEY ? GROQ_API_KEY.substring(0, 8) + '...' : 'NOT SET'
   });
 });
 
-// Debug test endpoint
+// Test endpoint
 app.get('/test', async (req, res) => {
-  if (!GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY not set' });
+  if (!GROQ_API_KEY) return res.status(500).json({ error: 'GROQ_API_KEY not set' });
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const r = await fetch(url, {
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Say: Zeno is working!' }] }] })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Say: Zeno is working!' }],
+        max_tokens: 50
+      })
     });
     const data = await r.json();
-    if (!r.ok) return res.status(502).json({ gemini_error: data });
-    res.json({ success: true, reply: data?.candidates?.[0]?.content?.parts?.[0]?.text });
+    if (!r.ok) return res.status(502).json({ groq_error: data });
+    res.json({ success: true, reply: data?.choices?.[0]?.message?.content });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -44,45 +51,50 @@ app.post('/chat', async (req, res) => {
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages array required' });
     }
-    if (!GEMINI_API_KEY) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY not set in environment' });
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'GROQ_API_KEY not set in environment' });
     }
 
-    const contents = [];
+    // Build messages array for Groq (OpenAI format)
+    const groqMessages = [];
 
+    // System message
     if (system) {
-      contents.push({ role: 'user', parts: [{ text: `[SYSTEM INSTRUCTIONS]\n${system}` }] });
-      contents.push({ role: 'model', parts: [{ text: 'Understood. I am Zeno, SellerTrackr AI advisor.' }] });
+      groqMessages.push({ role: 'system', content: system });
     }
 
-    messages.forEach(msg => {
-      contents.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }]
+    // Conversation history (last 10 messages)
+    messages.slice(-10).forEach(msg => {
+      groqMessages.push({
+        role: msg.role === 'assistant' ? 'assistant' : 'user',
+        content: msg.content
       });
     });
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-
-    const response = await fetch(geminiUrl, {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
       body: JSON.stringify({
-        contents,
-        generationConfig: { temperature: 0.7, maxOutputTokens: 800, topP: 0.9 }
+        model: 'llama-3.3-70b-versatile',
+        messages: groqMessages,
+        temperature: 0.7,
+        max_tokens: 800
       })
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      console.error('Gemini error:', JSON.stringify(data));
-      const errMsg = data?.error?.message || 'Gemini API error';
-      return res.status(502).json({ error: errMsg, code: data?.error?.code, raw: data });
+      console.error('Groq error:', JSON.stringify(data));
+      const errMsg = data?.error?.message || 'Groq API error';
+      return res.status(502).json({ error: errMsg, code: data?.error?.code });
     }
 
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!reply) return res.status(502).json({ error: 'No reply from Gemini', raw: data });
+    const reply = data?.choices?.[0]?.message?.content;
+    if (!reply) return res.status(502).json({ error: 'No reply from Groq', raw: data });
 
     res.json({ reply });
 
@@ -93,6 +105,6 @@ app.post('/chat', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Zeno AI running on port ${PORT}`);
-  console.log(`GEMINI_API_KEY set: ${!!GEMINI_API_KEY}`);
+  console.log(`Zeno AI (Groq) running on port ${PORT}`);
+  console.log(`GROQ_API_KEY set: ${!!GROQ_API_KEY}`);
 });

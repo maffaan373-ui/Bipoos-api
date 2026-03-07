@@ -279,3 +279,197 @@ app.listen(PORT, () => {
   console.log(`SellerTrackr Backend running on port ${PORT}`);
   console.log(`Groq: ${!!GROQ_API_KEY} | PayFast: ${!!PAYFAST_MERCHANT_ID}`);
 });
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUTO-RENEWAL ROUTES
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// ── POST /payment/autorenew ── (toggle auto-renew on/off)
+app.post('/payment/autorenew', async (req, res) => {
+  try {
+    const { user_id, auto_renew, plan } = req.body;
+    if (!user_id) return res.status(400).json({ error: 'user_id required' });
+
+    // Update Supabase profile
+    await sbUpdate('profiles', 'id', user_id, {
+      auto_renew,
+      subscription_status: auto_renew ? 'active' : 'manual'
+    });
+
+    // If turning ON and PayFast is configured, store permanent instrument token
+    // (PayFast recurring — user already has a permanent token from first payment)
+    if (auto_renew && PAYFAST_MERCHANT_ID) {
+      // Fetch the permanent instrument token from payments table
+      const payment = await sbSelect('payments', 'user_id', user_id);
+      if (payment?.permanent_token) {
+        console.log(`Auto-renew ON for ${user_id} — instrument token exists`);
+        // Store recurring flag with PayFast token reference
+        await sbUpdate('profiles', 'id', user_id, {
+          payfast_instrument_token: payment.permanent_token,
+          auto_renew_plan: plan
+        });
+      }
+    }
+
+    console.log(`Auto-renew ${auto_renew ? 'ON' : 'OFF'} for user ${user_id}`);
+    res.json({ success: true, auto_renew });
+  } catch (err) {
+    console.error('Autorenew error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /payment/cancel ── (cancel subscription)
+app.post('/payment/cancel', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: 'user_id required' });
+
+    await sbUpdate('profiles', 'id', user_id, {
+      auto_renew: false,
+      subscription_status: 'cancelled'
+    });
+
+    console.log(`Subscription cancelled for user ${user_id}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Cancel error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /payment/process-renewals ──────────────────────────
+// Yeh route CRON JOB se call hoga (daily, e.g. via cron-job.org)
+// URL: POST https://bipoos-api-1.onrender.com/payment/process-renewals
+// Header: x-cron-secret: YOUR_CRON_SECRET
+app.post('/payment/process-renewals', async (req, res) => {
+  const secret = req.headers['x-cron-secret'];
+  const CRON_SECRET = process.env.CRON_SECRET;
+
+  if (CRON_SECRET && secret !== CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    console.log('=== Processing auto-renewals ===');
+    const today = new Date().toISOString().split('T')[0];
+
+    // Fetch users where: is_premium=true, auto_renew=true, premium_until <= today+1day
+    const tomorrow = new Date(Date.now() + 86400000).toISOString();
+
+    const usersRes = await fetch(
+      `${SUPABASE_URL_PF}/rest/v1/profiles?is_premium=eq.true&auto_renew=eq.true&premium_until=lte.${tomorrow}&select=id,premium_plan,payfast_instrument_token,auto_renew_plan`,
+      { headers: { 'apikey': SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` } }
+    );
+    const users = await usersRes.json();
+
+    if (!users || users.length === 0) {
+      console.log('No renewals due today');
+      return res.json({ processed: 0, message: 'No renewals due' });
+    }
+
+    console.log(`Found ${users.length} users for renewal`);
+    const results = [];
+
+    for (const user of users) {
+      try {
+        const plan = user.auto_renew_plan || user.premium_plan || 'monthly';
+        const planAmounts = { monthly: 1500, business: 3500, annual_pro: 13500, annual_business: 31500 };
+        const amount = planAmounts[plan] || 1500;
+        const days = plan.includes('annual') ? 365 : 30;
+
+        if (!user.payfast_instrument_token || !PAYFAST_MERCHANT_ID) {
+          // No PayFast token — mark as renewal_pending, admin will handle
+          await sbUpdate('profiles', 'id', user.id, { subscription_status: 'renewal_pending' });
+
+          // Create a pending payment record
+          await fetch(`${SUPABASE_URL_PF}/rest/v1/payments`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_SERVICE_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+              'Prefer': 'return=representation'
+            },
+            body: JSON.stringify({
+              user_id: user.id, amount, plan,
+              method: 'auto_renew', status: 'renewal_pending',
+              created_at: new Date().toISOString()
+            })
+          });
+
+          results.push({ user_id: user.id, status: 'pending_no_token' });
+          continue;
+        }
+
+        // PayFast recurring transaction with stored instrument token
+        const authToken = await getPayFastToken();
+        const basketId  = `RENEW-${user.id.slice(0,8)}-${Date.now()}`;
+
+        const pfRes = await fetch(`${PAYFAST_BASE_URL}/api/Transaction/InitiateRecurring`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`
+          },
+          body: JSON.stringify({
+            MERCHANT_ID: PAYFAST_MERCHANT_ID,
+            TOKEN: authToken,
+            TXNAMT: amount.toString(),
+            BASKET_ID: basketId,
+            TXNDESC: `SellerTrackr ${plan} auto-renewal`,
+            INSTRUMENT_TOKEN: user.payfast_instrument_token
+          })
+        });
+
+        const pfData = await pfRes.json();
+        console.log(`Renewal for ${user.id}:`, pfData?.code || pfData?.status);
+
+        if (pfData?.code === '00' || pfData?.status === 'success') {
+          // Renewal success — extend premium_until
+          const newUntil = new Date(Date.now() + days * 86400000).toISOString();
+          await sbUpdate('profiles', 'id', user.id, {
+            premium_until: newUntil,
+            subscription_status: 'active',
+            last_renewed_at: new Date().toISOString()
+          });
+
+          // Log payment
+          await fetch(`${SUPABASE_URL_PF}/rest/v1/payments`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_SERVICE_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+            },
+            body: JSON.stringify({
+              user_id: user.id, amount, plan,
+              method: 'auto_renew', status: 'completed',
+              basket_id: basketId, created_at: new Date().toISOString()
+            })
+          });
+
+          results.push({ user_id: user.id, status: 'renewed', new_until: newUntil });
+        } else {
+          // Renewal failed — notify, keep premium for grace period (3 days)
+          await sbUpdate('profiles', 'id', user.id, { subscription_status: 'renewal_failed' });
+          results.push({ user_id: user.id, status: 'failed', reason: pfData?.message });
+        }
+
+      } catch (userErr) {
+        console.error(`Error for user ${user.id}:`, userErr.message);
+        results.push({ user_id: user.id, status: 'error', reason: userErr.message });
+      }
+    }
+
+    const renewed = results.filter(r => r.status === 'renewed').length;
+    const failed  = results.filter(r => r.status === 'failed').length;
+    console.log(`=== Done: ${renewed} renewed, ${failed} failed ===`);
+
+    res.json({ processed: users.length, renewed, failed, results });
+
+  } catch (err) {
+    console.error('Process renewals error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
